@@ -15,7 +15,7 @@ import torch.backends.cudnn as cudnn
 
 import sparselearning
 from models import cifar_resnet_q, initializers, vgg
-from sparselearning.core import Masking, CosineDecay, LinearDecay
+from sparselearning.core_q import Masking, CosineDecay, LinearDecay
 from sparselearning.resnet_cifar100_q import ResNet34, ResNet18, ResNet50
 from sparselearning.utils import get_mnist_dataloaders, get_cifar10_dataloaders, get_cifar100_dataloaders
 
@@ -178,7 +178,7 @@ def main():
     parser.add_argument('--decay-schedule', type=str, default='cosine', help='The decay schedule for the pruning rate. Default: cosine. Choose from: cosine, linear.')
     parser.add_argument('--nolr_scheduler', action='store_true', default=False,
                         help='disables CUDA training')
-    sparselearning.core.add_sparse_args(parser)
+    sparselearning.core_q.add_sparse_args(parser)
 
     args = parser.parse_args()
     setup_logger(args)
@@ -293,7 +293,8 @@ def main():
             # target sparsity is reached
             if epoch == args.multiplier * args.final_prune_epoch+1:
                 best_acc = 0.0
-
+            
+            savename = 'model_final_' + device.type + '.pth'
             if val_acc > best_acc:
                 print('Saving model')
                 best_acc = val_acc
@@ -301,12 +302,12 @@ def main():
                     'epoch': epoch + 1,
                     'state_dict': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
-                }, filename=os.path.join(save_subfolder, 'model_final.pth'))
+                }, filename=os.path.join(save_subfolder, savename))
 
             print_and_log('Current learning rate: {0}. Time taken for epoch: {1:.2f} seconds.\n'.format(optimizer.param_groups[0]['lr'], time.time() - t0))
 
         print('Testing model')
-        model.load_state_dict(torch.load(os.path.join(save_subfolder, 'model_final.pth'))['state_dict'])
+        model.load_state_dict(torch.load(os.path.join(save_subfolder, savename))['state_dict'])
         test_acc = evaluate(args, model, device, test_loader, is_test_set=True)
         print('Test accuracy is:', test_acc)
 

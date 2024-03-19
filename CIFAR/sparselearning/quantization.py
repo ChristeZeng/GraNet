@@ -21,6 +21,7 @@ _FULL_QUANT = False
 class Pact(Function):
     @staticmethod
     def forward(ctx, x, alpha, k):
+        # print('pact!!!')
         ctx.save_for_backward(x, alpha)
         # y_1 = 0.5 * ( torch.abs(x).detach() - torch.abs(x - alpha).detach() + alpha.item() )
         y = torch.clamp(x, min=0, max=alpha.item())
@@ -40,6 +41,7 @@ class Pact(Function):
 class dorefaQuantizer:
     @classmethod
     def quantize_weight(cls, weight, bit_mask, fn, ):
+
 
         weight_q = weight.clone()
 
@@ -70,6 +72,9 @@ class dorefaQuantizer:
 
         bit_mask = bit_mask.clip(1)
         scale=torch.pow(2,bit_mask)-1
+        scale=scale.to(input_ri.device)
+        # print ("scale device", scale.device)
+        # print ("input_ri device", input_ri.device)
         out=torch.round(input_ri*scale)/scale
 
         return out.detach()
@@ -89,14 +94,23 @@ def uniform_quantize(bit_mask):
     return QuantizeFunction.apply
 
 
+# class WeightQuantizeFn(nn.Module):
+#     def __init__(self, bit_mask):
+#         super(WeightQuantizeFn, self).__init__()
+#         self.bit_mask = bit_mask
+#         self.uniform_quantize = uniform_quantize(bit_mask)
+#
+#     def forward(self, x):
+#         return dorefaQuantizer.quantize_weight(x, self.bit_mask, self.uniform_quantize)
+
 class WeightQuantizeFn(nn.Module):
     def __init__(self, bit_mask):
         super(WeightQuantizeFn, self).__init__()
-        self.bit_mask = bit_mask
+        # self.bit_mask = bit_mask
         self.uniform_quantize = uniform_quantize(bit_mask)
 
-    def forward(self, x):
-        return dorefaQuantizer.quantize_weight(x, self.bit_mask, self.uniform_quantize)
+    def forward(self, x, bit_mask):
+        return dorefaQuantizer.quantize_weight(x, bit_mask, self.uniform_quantize)
 
 
 class Conv2dQuantized(nn.Conv2d):
@@ -104,14 +118,15 @@ class Conv2dQuantized(nn.Conv2d):
                  padding=0, dilation=1, groups=1, bias=True):
         super(Conv2dQuantized, self).__init__(in_channels, out_channels, kernel_size, stride,
                                               padding, dilation, groups, bias)
-        self.register_buffer('mask', torch.full_like(self.weight, fill_value=32, dtype=torch.int))
-        self.quantize_fn = WeightQuantizeFn(bit_mask=self.mask)
+        # self.register_buffer('mask', torch.full_like(self.weight, fill_value=32, dtype=torch.int))
+        # self.quantize_fn = WeightQuantizeFn(bit_mask=self.mask)
 
-    def forward(self, input, ):
-        weight_q = self.quantize_fn(self.weight)
-        return F.conv2d(input, weight_q, self.bias, self.stride,
-                        self.padding, self.dilation, self.groups)
-
+    # def forward(self, input, ):
+    #     # weight_q = self.quantize_fn(self.weight, self.mask)
+    #     # return F.conv2d(input, weight_q, self.bias, self.stride,
+    #     #                 self.padding, self.dilation, self.groups)
+    #
+    #     return super(Conv2dQuantized,self).forward(input)
 
 # def bn_quantize_fn(bit_mask):
 #     class BatchNormQuantized(nn.BatchNorm2d):
@@ -150,18 +165,18 @@ class Conv2dQuantized(nn.Conv2d):
 #     return LinearQuantized
 
 
-if __name__ == '__main__':
-    for scale in [32, 16, 8, 4, 2, 1, 0]:
-        conv = nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1)
-        img = torch.ones(1, 256, 56, 56)
+# if __name__ == '__main__':
+#     for scale in [32, 16, 8, 4, 2, 1, 0]:
+#         conv = nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1)
+#         img = torch.ones(1, 256, 56, 56)
 
-        mask = torch.ones_like(conv.weight) * scale
-        conv2d = conv2d_quantize_fn(bit_mask=mask)
-        conv1 = conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1)
+#         mask = torch.ones_like(conv.weight) * scale
+#         conv2d = conv2d_quantize_fn(bit_mask=mask)
+#         conv1 = conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1)
 
-        with torch.no_grad():
-            out = conv(img)
-            print('base', out.max().item(), out.min().item())
+#         with torch.no_grad():
+#             out = conv(img)
+#             print('base', out.max().item(), out.min().item())
 
-            out = conv1(img)
-            print(scale, out.max().item(), out.min().item())
+#             out = conv1(img)
+#             print(scale, out.max().item(), out.min().item())

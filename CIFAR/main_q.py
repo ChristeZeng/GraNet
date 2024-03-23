@@ -14,7 +14,7 @@ import torch.optim as optim
 import torch.backends.cudnn as cudnn
 
 import sparselearning
-from models import cifar_resnet_q, initializers, vgg
+from models import initializers, vgg
 from sparselearning.core_q import Masking, CosineDecay, LinearDecay
 from sparselearning.resnet_cifar100_q import ResNet34, ResNet18, ResNet50
 from sparselearning.utils import get_mnist_dataloaders, get_cifar10_dataloaders, get_cifar100_dataloaders
@@ -293,8 +293,8 @@ def main():
             # target sparsity is reached
             if epoch == args.multiplier * args.final_prune_epoch+1:
                 best_acc = 0.0
-            
-            savename = 'model_final_' + device.type + '.pth'
+
+            savename = 'model_final_' + str(device) + '.pth'
             if val_acc > best_acc:
                 print('Saving model')
                 best_acc = val_acc

@@ -65,10 +65,9 @@ class dorefaQuantizer:
     @classmethod
     def quantize_k(cls, input_ri, bit_mask):
 
-
         bit_mask = bit_mask.clip(1)
         scale=torch.pow(2,bit_mask)-1
-        scale=scale.to(input_ri.device)
+        # scale=scale.to(input_ri.device)
         # print ("scale device", scale.device)
         # print ("input_ri device", input_ri.device)
         out=torch.round(input_ri*scale)/scale
@@ -114,7 +113,7 @@ class Conv2dQuantized(nn.Conv2d):
                  padding=0, dilation=1, groups=1, bias=True):
         super(Conv2dQuantized, self).__init__(in_channels, out_channels, kernel_size, stride,
                                               padding, dilation, groups, bias)
-        self.register_buffer('mask', torch.full_like(self.weight, fill_value=32, dtype=torch.int))
+        self.register_buffer('mask', torch.full_like(self.weight, fill_value=32, dtype=torch.int,device='cuda'))
         self.quantize_fn = WeightQuantizeFn(bit_mask=self.mask)
 
     def forward(self, input, ):

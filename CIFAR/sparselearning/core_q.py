@@ -586,7 +586,6 @@ class Masking(object):
     def apply_mask(self):
         # do nothing for debug
         pass
-
     def truncate_weights(self, step=None):
 
         self.gather_statistics()
@@ -661,14 +660,14 @@ class Masking(object):
                     # DEATH
 
     def adjust_quantization(self, weight, name):
+        quant_level = self.masks[name]
+
         num_remove = math.ceil(self.prune_rate * self.name2nonzeros[name])
-        if num_remove == 0.0: return weight.data != 0.0
+        if num_remove == 0.0: return quant_level
         num_zeros = self.name2zeros[name]
         k = math.ceil(num_zeros + num_remove)
         x, idx = torch.sort(torch.abs(weight.data.view(-1)))
         threshold = x[k - 1].item()
-
-        quant_level = self.masks[name]
 
         return torch.where(torch.abs(weight) <= threshold,
                            torch.floor(quant_level / 2),

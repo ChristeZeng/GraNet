@@ -583,9 +583,6 @@ class Masking(object):
                 if isinstance(module, nn_type):
                     self.remove_weight(name)
 
-    def apply_mask(self):
-        # do nothing for debug
-        pass
     def truncate_weights(self, step=None):
 
         self.gather_statistics()
@@ -638,7 +635,6 @@ class Masking(object):
 
         print ('growing done')
 
-        # self.apply_mask()
 
     '''
                     REDISTRIBUTION
@@ -689,58 +685,9 @@ class Masking(object):
 
             return tmp_mask_flat.view_as(new_mask)
 
-    def magnitude_death(self, mask, weight, name):
-        num_remove = math.ceil(self.prune_rate * self.name2nonzeros[name])
-        if num_remove == 0.0: return weight.data != 0.0
-        num_zeros = self.name2zeros[name]
-        k = math.ceil(num_zeros + num_remove)
-        x, idx = torch.sort(torch.abs(weight.data.view(-1)))
-        threshold = x[k - 1].item()
-
-        return (torch.abs(weight.data) > threshold)
-
-        # GROWTH
-
-    def random_growth(self, name, new_mask, total_regrowth, weight):
-        n = (new_mask == 0).sum().item()
-        if n == 0: return new_mask
-        expeced_growth_probability = (total_regrowth / n)
-        new_weights = torch.rand(new_mask.shape).cuda() < expeced_growth_probability  # lsw
-        # new_weights = torch.rand(new_mask.shape) < expeced_growth_probability
-        new_mask_ = new_mask.byte() | new_weights
-        if (new_mask_ != 0).sum().item() == 0:
-            new_mask_ = new_mask
-        return new_mask_
-
-    def momentum_growth(self, name, new_mask, total_regrowth, weight):
-        grad = self.get_momentum_for_weight(weight)
-        grad = grad * (new_mask == 0).float()
-        y, idx = torch.sort(torch.abs(grad).flatten(), descending=True)
-        new_mask.data.view(-1)[idx[:total_regrowth]] = 1.0
-
-        return new_mask
-
-    def gradient_growth(self, name, new_mask, total_regrowth, weight):
-        grad = self.get_gradient_for_weights(weight)
-        grad = grad * (new_mask == 0).float()
-
-        y, idx = torch.sort(torch.abs(grad).flatten(), descending=True)
-        new_mask.data.view(-1)[idx[:total_regrowth]] = 1.0
-
-        return new_mask
-
     '''
                 UTILITY
     '''
-
-    def get_momentum_for_weight(self, weight):
-        if 'exp_avg' in self.optimizer.state[weight]:
-            adam_m1 = self.optimizer.state[weight]['exp_avg']
-            adam_m2 = self.optimizer.state[weight]['exp_avg_sq']
-            grad = adam_m1 / (torch.sqrt(adam_m2) + 1e-08)
-        elif 'momentum_buffer' in self.optimizer.state[weight]:
-            grad = self.optimizer.state[weight]['momentum_buffer']
-        return grad
 
     def get_gradient_for_weights(self, weight):
         grad = weight.grad.clone()
@@ -758,57 +705,6 @@ class Masking(object):
                     print(val)
 
         print('Death rate: {0}\n'.format(self.prune_rate))
-
-    def reset_momentum(self):
-        """
-        Taken from: https://github.com/AlliedToasters/synapses/blob/master/synapses/SET_layer.py
-        Resets buffers from memory according to passed indices.
-        When connections are reset, parameters should be treated
-        as freshly initialized.
-        """
-        print ('In reset_momentum')
-        for module in self.modules:
-            for name, tensor in module.named_parameters():
-                mask_name = name.replace('weight', 'mask')
-                if mask_name not in self.masks: continue
-                mask = self.masks[mask_name]
-                weights = list(self.optimizer.state[tensor])
-                for w in weights:
-                    if w == 'momentum_buffer':
-                        # momentum
-                        if self.args.reset_mom_zero:
-                            print('zero')
-                            self.optimizer.state[tensor][w][mask == 0] = 0
-                        else:
-                            print('mean')
-                            self.optimizer.state[tensor][w][mask == 0] = torch.mean(
-                                self.optimizer.state[tensor][w][mask.byte()])
-                        # self.optimizer.state[tensor][w][mask==0] = 0
-                    elif w == 'square_avg' or \
-                            w == 'exp_avg' or \
-                            w == 'exp_avg_sq' or \
-                            w == 'exp_inf':
-                        # Adam
-                        self.optimizer.state[tensor][w][mask == 0] = torch.mean(
-                            self.optimizer.state[tensor][w][mask.byte()])
-
-    def fired_masks_update(self):
-        print ('In fired_masks_update')
-        ntotal_fired_weights = 0.0
-        ntotal_weights = 0.0
-        layer_fired_weights = {}
-        for module in self.modules:
-            for name, weight in module.named_parameters():
-                if name not in self.masks: continue
-                self.fired_masks[name] = self.masks[name].data.byte() | self.fired_masks[name].data.byte()
-                ntotal_fired_weights += float(self.fired_masks[name].sum().item())
-                ntotal_weights += float(self.fired_masks[name].numel())
-                layer_fired_weights[name] = float(self.fired_masks[name].sum().item()) / float(
-                    self.fired_masks[name].numel())
-                print('Layerwise percentage of the fired weights of', name, 'is:', layer_fired_weights[name])
-        total_fired_weights = ntotal_fired_weights / ntotal_weights
-        print('The percentage of the total fired weights is:', total_fired_weights)
-        return layer_fired_weights, total_fired_weights
 
     def print_stats(self):
             for module in self.modules:

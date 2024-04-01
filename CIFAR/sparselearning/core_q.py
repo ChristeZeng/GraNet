@@ -123,154 +123,12 @@ class Masking(object):
             for module in self.modules:
                 for name, buffer in module.named_buffers():
                     if 'mask' in name:
-                        print(f'init mask {name}: {buffer.view(-1)}')
+                        # print(f'init mask {name}: {buffer.view(-1)}')
                         self.masks[name] = buffer
                         self.baseline_nonzero += (self.masks[name] == 32).sum().int().item()
 
-            print("During initialization")
-            for module in self.modules:
-                for name, param in module.named_parameters():
-                    mask_name = name.replace('weight', 'mask')
-                    if mask_name in self.masks:
-                        print(f'{mask_name} mask: {self.masks[mask_name].view(-1)}')
-
-        # elif self.sparse_init == 'prune_uniform':
-        #     # used for pruning stabability test
-        #     print('initialized by prune_uniform')
-        #     self.baseline_nonzero = 0
-        #     for module in self.modules:
-        #         for name, weight in module.named_parameters():
-        #             if name not in self.masks: continue
-        #             self.masks[name] = (weight!=0).cuda()
-        #             num_zeros = (weight==0).sum().item()
-        #             num_remove = (self.args.pruning_rate) * self.masks[name].sum().item()
-        #             k = math.ceil(num_zeros + num_remove)
-        #             if num_remove == 0.0: return weight.data != 0.0
-        #             x, idx = torch.sort(torch.abs(weight.data.view(-1)))
-        #             self.masks[name].data.view(-1)[idx[:k]] = 0.0
-        #             self.baseline_nonzero += (self.masks[name] != 0).sum().int().item()
-        #     self.apply_mask()
-
-        # elif self.sparse_init == 'prune_global':
-        #     # used for pruning stabability test
-        #     print('initialized by prune_global')
-        #     self.baseline_nonzero = 0
-        #     total_num_nonzoros = 0
-        #     for module in self.modules:
-        #         for name, weight in module.named_parameters():
-        #             if name not in self.masks: continue
-        #             self.masks[name] = (weight!=0).cuda()
-        #             self.name2nonzeros[name] = (weight!=0).sum().item()
-        #             total_num_nonzoros += self.name2nonzeros[name]
-
-        #     weight_abs = []
-        #     for module in self.modules:
-        #         for name, weight in module.named_parameters():
-        #             if name not in self.masks: continue
-        #             weight_abs.append(torch.abs(weight))
-
-        #     # Gather all scores in a single vector and normalise
-        #     all_scores = torch.cat([torch.flatten(x) for x in weight_abs])
-        #     num_params_to_keep = int(total_num_nonzoros * (1 - self.args.pruning_rate))
-
-        #     threshold, _ = torch.topk(all_scores, num_params_to_keep, sorted=True)
-        #     acceptable_score = threshold[-1]
-
-        #     for module in self.modules:
-        #         for name, weight in module.named_parameters():
-        #             if name not in self.masks: continue
-        #             self.masks[name] = ((torch.abs(weight)) >= acceptable_score).float()
-        #     self.apply_mask()
-
-        # elif self.sparse_init == 'prune_and_grow_uniform':
-        #     # used for pruning stabability test
-        #     print('initialized by pruning and growing uniformly')
-
-        #     self.baseline_nonzero = 0
-        #     for module in self.modules:
-        #         for name, weight in module.named_parameters():
-        #             if name not in self.masks: continue
-        #             # prune
-        #             self.masks[name] = (weight!=0).cuda()
-        #             num_zeros = (weight==0).sum().item()
-        #             num_remove = (self.args.pruning_rate) * self.masks[name].sum().item()
-        #             k = math.ceil(num_zeros + num_remove)
-        #             if num_remove == 0.0: return weight.data != 0.0
-        #             x, idx = torch.sort(torch.abs(weight.data.view(-1)))
-        #             self.masks[name].data.view(-1)[idx[:k]] = 0.0
-        #             total_regrowth = (self.masks[name]==0).sum().item() - num_zeros
-
-        #             # set the pruned weights to zero
-        #             weight.data = weight.data * self.masks[name]
-        #             if 'momentum_buffer' in self.optimizer.state[weight]:
-        #                 self.optimizer.state[weight]['momentum_buffer'] = self.optimizer.state[weight]['momentum_buffer'] * self.masks[name]
-
-        #             # grow
-        #             grad = grad_dict[name]
-        #             grad = grad * (self.masks[name] == 0).float()
-
-        #             y, idx = torch.sort(torch.abs(grad).flatten(), descending=True)
-        #             self.masks[name].data.view(-1)[idx[:total_regrowth]] = 1.0
-        #             self.baseline_nonzero += (self.masks[name] != 0).sum().int().item()
-        #     self.apply_mask()
-
-        # elif self.sparse_init == 'prune_and_grow_global':
-        #     # used for pruning stabability test
-        #     print('initialized by pruning and growing globally')
-        #     self.baseline_nonzero = 0
-        #     total_num_nonzoros = 0
-        #     for module in self.modules:
-        #         for name, weight in module.named_parameters():
-        #             if name not in self.masks: continue
-        #             self.masks[name] = (weight!=0).cuda()
-        #             self.name2nonzeros[name] = (weight!=0).sum().item()
-        #             total_num_nonzoros += self.name2nonzeros[name]
-
-        #     weight_abs = []
-        #     for module in self.modules:
-        #         for name, weight in module.named_parameters():
-        #             if name not in self.masks: continue
-        #             weight_abs.append(torch.abs(weight))
-
-        #     # Gather all scores in a single vector and normalise
-        #     all_scores = torch.cat([torch.flatten(x) for x in weight_abs])
-        #     num_params_to_keep = int(total_num_nonzoros * (1 - self.args.pruning_rate))
-
-        #     threshold, _ = torch.topk(all_scores, num_params_to_keep, sorted=True)
-        #     acceptable_score = threshold[-1]
-
-        #     for module in self.modules:
-        #         for name, weight in module.named_parameters():
-        #             if name not in self.masks: continue
-        #             self.masks[name] = ((torch.abs(weight)) >= acceptable_score).float()
-
-        #             # set the pruned weights to zero
-        #             weight.data = weight.data * self.masks[name]
-        #             if 'momentum_buffer' in self.optimizer.state[weight]:
-        #                 self.optimizer.state[weight]['momentum_buffer'] = self.optimizer.state[weight]['momentum_buffer'] * self.masks[name]
-
-        #     ### grow
-        #     for module in self.modules:
-        #         for name, weight in module.named_parameters():
-        #             if name not in self.masks: continue
-        #             total_regrowth = self.name2nonzeros[name] - (self.masks[name]!=0).sum().item()
-        #             grad = grad_dict[name]
-        #             grad = grad * (self.masks[name] == 0).float()
-
-        #             y, idx = torch.sort(torch.abs(grad).flatten(), descending=True)
-        #             self.masks[name].data.view(-1)[idx[:total_regrowth]] = 1.0
-        #             self.baseline_nonzero += (self.masks[name] != 0).sum().int().item()
-        #     self.apply_mask()
-
-        # elif self.sparse_init == 'uniform':
-        #     self.baseline_nonzero = 0
-        #     for module in self.modules:
-        #         for name, weight in module.named_parameters():
-        #             if name not in self.masks: continue
-        #             self.masks[name][:] = (torch.rand(weight.shape) < density).float().data.cuda()  # lsw
-        #             # self.masks[name][:] = (torch.rand(weight.shape) < density).float().data #lsw
-        #             self.baseline_nonzero += weight.numel() * density
-        #     self.apply_mask()
+            # print("During initialization")
+            # self.print_stats()
 
         elif self.sparse_init == 'ERK':
             print('initialize by ERK')
@@ -339,20 +197,23 @@ class Masking(object):
                 total_nonzero += density_dict[name] * mask.numel()
             print(f"Overall sparsity {total_nonzero / self.total_params}")
 
-        # self.apply_mask()
-
         total_size = 0
         for name, weight in self.masks.items():
             total_size += weight.numel()
 
         sparse_size = 0
         for name, weight in self.masks.items():
-            sparse_size += (weight != 0).sum().int().item()
+            sparse_size += ((weight == 16) * 0.5
+                            + (weight == 8) * 0.75
+                            + (weight == 4) * 0.875
+                            + (weight == 2) * 0.9375
+                            + (weight == 1) * 0.96875
+                            + (weight == 0) * 1.0).sum().item()
+        
         print('Total parameters under sparsity level of {0}: {1}'.format(density, sparse_size / total_size))
 
     def step(self):
         self.optimizer.step()
-        # self.apply_mask()
         self.prune_rate_decay.step()
         self.prune_rate = self.prune_rate_decay.get_dr()
         self.steps += 1
@@ -364,25 +225,6 @@ class Masking(object):
                     self.pruning(self.steps)
                     self.truncate_weights(self.steps)
                     self.print_nonzero_counts()
-            elif self.args.method == 'GraNet_uniform':
-                if self.steps >= (self.args.init_prune_epoch * len(
-                        self.loader) * self.args.multiplier) and self.steps % self.prune_every_k_steps == 0:
-                    self.pruning_uniform(self.steps)
-                    self.truncate_weights(self.steps)
-                    self.print_nonzero_counts()
-                # _, _ = self.fired_masks_update()
-            elif self.args.method == 'DST':
-                if self.steps % self.prune_every_k_steps == 0:
-                    self.truncate_weights()
-                    self.print_nonzero_counts()
-            elif self.args.method == 'GMP':
-                if self.steps >= (self.args.init_prune_epoch * len(
-                        self.loader) * self.args.multiplier) and self.steps % self.prune_every_k_steps == 0:
-                    self.pruning(self.steps)
-            elif self.args.method == 'GMP_uniform':
-                if self.steps >= (self.args.init_prune_epoch * len(
-                        self.loader) * self.args.multiplier) and self.steps % self.prune_every_k_steps == 0:
-                    self.pruning_uniform(self.steps)
 
     def pruning(self, step):
         # prune_rate = 1 - self.args.final_density - self.args.init_density
@@ -407,8 +249,6 @@ class Masking(object):
                     mask_name = name.replace('weight', 'mask')
                     if mask_name in self.masks:
                         weight_abs.append(torch.abs(weight))
-                    # if name not in self.masks: continue
-                    # weight_abs.append(torch.abs(weight))
 
             # Gather all scores in a single vector and normalise
             all_scores = torch.cat([torch.flatten(x) for x in weight_abs])
@@ -418,39 +258,26 @@ class Masking(object):
             acceptable_score = threshold[-1]
             print('acceptable_score:', acceptable_score)
             print("before pruning")
-            # print the mask to debug
-            for module in self.modules:
-                for name, _ in module.named_parameters():
-                    mask_name = name.replace('weight', 'mask')
-                    if mask_name in self.masks:
-                        print(f'{mask_name} : {self.masks[mask_name].view(-1)}')
+            self.print_stats()
 
             for module in self.modules:
                 for name, weight in module.named_parameters():
                     mask_name = name.replace('weight', 'mask')
                     if mask_name in self.masks:
                         quant_level = self.masks[mask_name]
-                        # print('quant_level:', quant_level.view(-1))
-                        # print('abs weight:', torch.abs(weight).view(-1))
                         new_quant_level = torch.where(torch.abs(weight) <= acceptable_score,
                                                       torch.floor(quant_level / 2),
                                                       quant_level).int()
-                        # print('new_quant_level:', new_quant_level.view(-1))
-                        # in place operation
                         self.masks[mask_name].set_(new_quant_level)
-                        # self.masks[name] = new_quant_level
-
-                    # self.masks[name] = ((torch.abs(weight)) > acceptable_score).float() # must be > to prevent acceptable_score is zero, leading to dense tensors
 
             print("after pruning")
-            # print the mask to debug
+            self.print_stats()
+
             for module in self.modules:
                 for name, tensor in module.named_parameters():
                     mask_name = name.replace('weight', 'mask')
                     if mask_name in self.masks:
                         print(f'{mask_name} mask: {self.masks[mask_name].view(-1)}')
-
-            # self.apply_mask()
 
             total_size = 0
             for name, mask in self.masks.items():
@@ -465,67 +292,10 @@ class Masking(object):
                                 + (mask == 4) * 0.875
                                 + (mask == 2) * 0.9375
                                 + (mask == 1) * 0.96875
-                                + (mask == 0) * 1).sum().item()
+                                + (mask == 0) * 1.0).sum().item()
 
             print('Sparsity after pruning: {0}'.format(
                 sparse_size / total_size))
-
-    def pruning_uniform(self, step):
-        # prune_rate = 1 - self.args.final_density - self.args.init_density
-        curr_prune_iter = int(step / self.prune_every_k_steps)
-        final_iter = (self.args.final_prune_epoch * len(self.loader) * self.args.multiplier) / self.prune_every_k_steps
-        ini_iter = (self.args.init_prune_epoch * len(self.loader) * self.args.multiplier) / self.prune_every_k_steps
-        total_prune_iter = final_iter - ini_iter
-        print('******************************************************')
-        print(f'Pruning Progress is {curr_prune_iter - ini_iter} / {total_prune_iter}')
-        print('******************************************************')
-
-        if curr_prune_iter >= ini_iter and curr_prune_iter <= final_iter:
-            prune_decay = (1 - ((curr_prune_iter - ini_iter) / total_prune_iter)) ** 3
-            curr_prune_rate = (1 - self.args.init_density) + (self.args.init_density - self.args.final_density) * (
-                    1 - prune_decay)
-            # keep the density of the last layer as 0.2 if spasity is larger then 0.8
-            if curr_prune_rate >= 0.8:
-                curr_prune_rate = 1 - (self.total_params * (1 - curr_prune_rate) - 0.2 * self.fc_params) / (
-                            self.total_params - self.fc_params)
-
-                for module in self.modules:
-                    for name, weight in module.named_parameters():
-                        if name not in self.masks: continue
-                        score = torch.flatten(torch.abs(weight))
-                        if 'classifier' in name:
-                            num_params_to_keep = int(len(score) * 0.2)
-                            threshold, _ = torch.topk(score, num_params_to_keep, sorted=True)
-                            acceptable_score = threshold[-1]
-                            self.masks[name] = ((torch.abs(weight)) >= acceptable_score).float()
-                        else:
-                            num_params_to_keep = int(len(score) * (1 - curr_prune_rate))
-                            threshold, _ = torch.topk(score, num_params_to_keep, sorted=True)
-                            acceptable_score = threshold[-1]
-                            self.masks[name] = ((torch.abs(weight)) >= acceptable_score).float()
-            else:
-                for module in self.modules:
-                    for name, weight in module.named_parameters():
-                        if name not in self.masks: continue
-                        score = torch.flatten(torch.abs(weight))
-                        num_params_to_keep = int(len(score) * (1 - curr_prune_rate))
-                        threshold, _ = torch.topk(score, num_params_to_keep, sorted=True)
-                        acceptable_score = threshold[-1]
-                        self.masks[name] = ((torch.abs(weight)) >= acceptable_score).float()
-
-            # self.apply_mask()
-
-            total_size = 0
-            for name, weight in self.masks.items():
-                total_size += weight.numel()
-            print('Total Model parameters:', total_size)
-
-            sparse_size = 0
-            for name, weight in self.masks.items():
-                sparse_size += (weight != 0).sum().int().item()
-
-            print('Sparsity after pruning: {0}'.format(
-                (total_size - sparse_size) / total_size))
 
     def add_module(self, module, sparse_init='ERK', grad_dic=None):
         self.module = module
@@ -589,11 +359,7 @@ class Masking(object):
 
         with torch.no_grad():
             print('before truncating')
-            for module in self.modules:
-                for name, tensor in module.named_parameters():
-                    mask_name = name.replace('weight', 'mask')
-                    if mask_name in self.masks:
-                        print(f'{mask_name} mask: {self.masks[mask_name].view(-1)}')
+            self.print_stats()
 
             # # prune - change to q
             for module in self.modules:
@@ -611,11 +377,8 @@ class Masking(object):
                         self.masks[mask_name].set_(new_mask)
 
         print('before growing')
-        for module in self.modules:
-            for name, _ in module.named_parameters():
-                mask_name = name.replace('weight', 'mask')
-                if mask_name in self.masks:
-                    print(f'{mask_name} mask: {self.masks[mask_name].view(-1)}')
+        self.print_stats()
+
         # grow
         for module in self.modules:
             for name, weight in module.named_parameters():
@@ -707,8 +470,8 @@ class Masking(object):
         print('Death rate: {0}\n'.format(self.prune_rate))
 
     def print_stats(self):
-            for module in self.modules:
-                for name, tensor in module.named_parameters():
-                    mask_name = name.replace('weight', 'mask')
-                    if mask_name in self.masks:
-                        print(f'{mask_name} mask: {self.masks[mask_name].view(-1)}')
+        for module in self.modules:
+            for name, _ in module.named_parameters():
+                mask_name = name.replace('weight', 'mask')
+                if mask_name in self.masks:
+                    print(f'{mask_name} mask: {self.masks[mask_name].view(-1)}')

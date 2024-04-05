@@ -402,8 +402,8 @@ class Masking(object):
                 if mask_name in self.masks:
                     mask = self.masks[mask_name]
 
-                    self.name2nonzeros[mask_name] = (mask == 32).sum().item()
-                    self.name2zeros[mask_name] = mask.numel() - self.name2nonzeros[mask_name]
+                    self.name2zeros[mask_name] = (mask == 0).sum().item()
+                    self.name2nonzeros[mask_name] = mask.numel() - self.name2zeros[mask_name] 
 
                     # DEATH
 
@@ -436,39 +436,6 @@ class Masking(object):
 
         return new_quant_level.view_as(quant_level)
 
-    # def adjust_quantization(self, weight, name):
-    #     quant_level = self.masks[name]
-
-    #     weight_abs = torch.abs(weight.data.view(-1))
-    #     bitwidths = self.masks[name].view(-1)
-    #     sorted_idxs = torch.argsort(weight_abs, descending=False)
-    #     sorted_bitwidths = bitwidths[sorted_idxs]
-
-    #     sparsity_contributions = (1 - (sorted_bitwidths // 2) / 32.0) - (1 - sorted_bitwidths / 32.0)
-    #     total_weights = weight_abs.numel()
-    #     sparsity_contributions /= total_weights
-
-    #     # TODO: confirm this self.prune_rate from num_remove = math.ceil(self.prune_rate * self.name2nonzeros[name])
-    #     accumulated_sparsity = 0.0
-    #     adjustment_count = 0
-    #     for contribution in sparsity_contributions:
-    #         accumulated_sparsity += contribution.item()
-    #         adjustment_count += 1
-    #         self.pruning_rate[name] = accumulated_sparsity
-    #         if accumulated_sparsity >= self.prune_rate:
-    #             break
-        
-        
-    #     if adjustment_count > 0:
-    #         threshold = weight_abs[sorted_idxs[adjustment_count - 1]].item()
-    #     else:
-    #         threshold = 0.0
-
-    #     return torch.where(torch.abs(weight) <= threshold,
-    #                        torch.floor(quant_level / 2),
-    #                        quant_level).int()
-
-
     def quantization_gradient_growth(self, name, new_mask, total_regrowth, weight):
         grad = self.get_gradient_for_weights(weight)  
         eligible_for_growth = new_mask < 32  
@@ -491,43 +458,6 @@ class Masking(object):
         new_mask_flattened[grow_indices] = next_bitwidths[:num_elements_to_grow]
 
         return new_mask.view_as(new_mask)
-
-    # def quantization_gradient_growth(self, name, new_mask, total_regrowth, weight):
-    #     grad = self.get_gradient_for_weights(weight)
-    #     eligible_for_growth = (new_mask < 32)
-    #     grad = grad * eligible_for_growth.float()
-
-    #     sorted_idxs = torch.argsort(torch.abs(grad).flatten(), descending=True)
-    #     decreased_sparsity = 0.0
-    #     idx = 0
-    #     total_elements = weight.numel()
-    #     while decreased_sparsity < total_regrowth and idx < len(sorted_idxs):
-    #         current_idx = sorted_idxs[idx]
-    #         current_bitwidth = new_mask.view(-1)[current_idx]
-    #         if current_bitwidth < 32:
-    #             contribution = (1 - (current_bitwidth * 2) / 32.0) - (1 - current_bitwidth / 32.0)
-    #             decreased_sparsity += contribution / total_elements
-    #             new_mask.view(-1)[current_idx] = min(32, current_bitwidth * 2)
-    #         idx += 1
-    #     print ('After growth: ', decreased_sparsity)
-    #     return new_mask
-    
-
-    # def quantization_gradient_growth(self, name, new_mask, total_regrowth, weight):
-    #     grad = self.get_gradient_for_weights(weight)
-    #     eligible_for_growth = (new_mask < 32)
-    #     grad = grad * eligible_for_growth.float()
-
-    #     _, idx = torch.sort(torch.abs(grad).flatten(), descending=True)
-    #     growth_indices = idx[:total_regrowth]
-
-    #     tmp_mask_flat = new_mask.clone().view(-1)
-    #     cur_level = tmp_mask_flat[growth_indices]
-    #     new_levels = torch.where(cur_level == 0, torch.tensor(1, device=cur_level.device),
-    #                         torch.min(torch.tensor(32, device=cur_level.device), cur_level * 2))
-    #     tmp_mask_flat.scatter_(0, growth_indices, new_levels)
-
-    #     return tmp_mask_flat.view_as(new_mask)
 
     '''
                 UTILITY

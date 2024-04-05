@@ -294,7 +294,14 @@ def main():
             if epoch == args.multiplier * args.final_prune_epoch+1:
                 best_acc = 0.0
 
-            savename = 'model_final_' + str(device) + '.pth'
+            cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
+            if cuda_devices is not None:
+                device_id = cuda_devices
+            else:
+                device_id = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
+                
+            savename = f'model_final_{device_id}.pth'
+            print ('device_id:', device_id)
             if val_acc > best_acc:
                 print('Saving model')
                 best_acc = val_acc

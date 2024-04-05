@@ -245,6 +245,27 @@ class Masking(object):
 
             print ('curr_prune_rate:', curr_prune_rate)
 
+            total_size = 0
+            for name, mask in self.masks.items():
+                total_size += mask.numel()
+            print('Total masked parameters:', total_size)
+
+            sparse_size = 0
+            for name, mask in self.masks.items():
+                # sparse_size += (mask == 32).sum().int().item()
+                sparse_size += ((mask == 16) * 0.5
+                                + (mask == 8) * 0.75
+                                + (mask == 4) * 0.875
+                                + (mask == 2) * 0.9375
+                                + (mask == 1) * 0.96875
+                                + (mask == 0) * 1.0).sum().item()
+
+            before_pruning_sparsity = sparse_size / total_size
+
+            need_prune_rate = curr_prune_rate - before_pruning_sparsity
+
+            print ('need_prune_rate:', need_prune_rate)
+            
             all_weights = torch.cat([torch.abs(weight).view(-1) for module in self.modules for name, weight in module.named_parameters() if name.replace('weight', 'mask') in self.masks])
             all_bitwidths = torch.cat([self.masks[name.replace('weight', 'mask')].view(-1) for module in self.modules for name, weight in module.named_parameters() if name.replace('weight', 'mask') in self.masks])
             sorted_indices = torch.argsort(all_weights)
@@ -252,7 +273,7 @@ class Masking(object):
             sparsity_contributions = (1 - (all_bitwidths[sorted_indices] // 2) / 32.0) - (1 - all_bitwidths[sorted_indices] / 32.0)
             accumulated_sparsity = torch.cumsum(sparsity_contributions / all_weights.numel(), dim=0)
 
-            threshold_idx = torch.searchsorted(accumulated_sparsity, curr_prune_rate, right=True) 
+            threshold_idx = torch.searchsorted(accumulated_sparsity, need_prune_rate, right=True) 
             acceptable_score = all_weights[sorted_indices[threshold_idx]].item() if threshold_idx < all_weights.numel() else float('inf')
             
             print('accumulated_sparsity:', accumulated_sparsity)
@@ -272,11 +293,6 @@ class Masking(object):
 
             # print("after pruning")
             # self.print_stats()
-
-            total_size = 0
-            for name, mask in self.masks.items():
-                total_size += mask.numel()
-            print('Total masked parameters:', total_size)
 
             sparse_size = 0
             for name, mask in self.masks.items():
@@ -362,7 +378,7 @@ class Masking(object):
                     if mask_name in self.masks:
 
                         new_mask = self.adjust_quantization(weight, mask_name)
-                        print ('After adjust_quantization, pruning_rate:', self.pruning_rate[mask_name])
+                        # print ('After adjust_quantization, pruning_rate:', self.pruning_rate[mask_name])
                         # self.pruning_rate[mask_name] = int(self.name2nonzeros[mask_name] - (new_mask == 32).sum().item())
 
                         new_mask = new_mask.to(torch.int32)
@@ -382,7 +398,7 @@ class Masking(object):
                                                                 weight)
 
                     new_mask = new_mask.to(torch.int32)
-                    print (f'new_mask {mask_name} : {new_mask.view(-1)}')
+                    # print (f'new_mask {mask_name} : {new_mask.view(-1)}')
                     self.masks[mask_name].set_(new_mask)
 
         print ('growing done')
@@ -420,7 +436,7 @@ class Masking(object):
         accumulated_sparsity = torch.cumsum(sparsity_contributions / weight_abs.numel(), dim=0)
 
         target_sparsity = self.prune_rate * accumulated_sparsity[-1].item()
-        print ('target_sparsity:', target_sparsity)
+        # print ('target_sparsity:', target_sparsity)
         threshold_idx = torch.searchsorted(accumulated_sparsity, target_sparsity, right=True)
         if threshold_idx < weight_abs.numel():
             threshold = weight_abs.view(-1)[sorted_indices[threshold_idx]]
@@ -429,7 +445,7 @@ class Masking(object):
             threshold = 0.0
             self.pruning_rate[mask_name] = 0.0
 
-        print ('threshold:', threshold)
+        # print ('threshold:', threshold)
         new_quant_level = torch.where(weight_abs.view(-1) <= threshold,
                                     torch.floor(quant_level.view(-1) / 2),
                                     quant_level.view(-1))

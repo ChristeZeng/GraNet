@@ -243,42 +243,22 @@ class Masking(object):
             curr_prune_rate = (1 - self.args.init_density) + (self.args.init_density - self.args.final_density) * (
                     1 - prune_decay)
 
-            weight_abs = []
-            bitwidths = []
-            for module in self.modules:
-                for name, weight in module.named_parameters():
-                    mask_name = name.replace('weight', 'mask')
-                    if mask_name in self.masks:
-                        weight_abs.append(torch.abs(weight))
-                        bitwidths.append(self.masks[mask_name])
+            print ('curr_prune_rate:', curr_prune_rate)
 
-            # Gather all scores in a single vector and normalise
-            all_scores = torch.cat([torch.flatten(x) for x in weight_abs])
-            all_bitwidths = torch.cat([torch.flatten(x) for x in bitwidths])
-            sorted_idxs = torch.argsort(all_scores, descending=False)
-            sorted_bitwidths = all_bitwidths[sorted_idxs]
+            all_weights = torch.cat([torch.abs(weight).view(-1) for module in self.modules for name, weight in module.named_parameters() if name.replace('weight', 'mask') in self.masks])
+            all_bitwidths = torch.cat([self.masks[name.replace('weight', 'mask')].view(-1) for module in self.modules for name, weight in module.named_parameters() if name.replace('weight', 'mask') in self.masks])
+            sorted_indices = torch.argsort(all_weights)
 
-            sparsity_contributions = (1 - (sorted_bitwidths // 2) / 32.0) - (1 - sorted_bitwidths / 32.0)
-            total_weights = all_scores.numel()
-            sparsity_contributions /= total_weights
+            sparsity_contributions = (1 - (all_bitwidths[sorted_indices] // 2) / 32.0) - (1 - all_bitwidths[sorted_indices] / 32.0)
+            accumulated_sparsity = torch.cumsum(sparsity_contributions / all_weights.numel(), dim=0)
 
-            accumulated_sparsity = 0.0
-            adjustment_count = 0
-
-            for contribution in sparsity_contributions:
-                accumulated_sparsity += contribution.item()
-                adjustment_count += 1
-                if accumulated_sparsity >= curr_prune_rate:
-                    break
-
-            if adjustment_count > 0:    
-                acceptable_score = all_scores[sorted_idxs[adjustment_count - 1]].item()
-            else:
-                acceptable_score = 0.0
-                        
+            threshold_idx = torch.searchsorted(accumulated_sparsity, curr_prune_rate, right=True) 
+            acceptable_score = all_weights[sorted_indices[threshold_idx]].item() if threshold_idx < all_weights.numel() else float('inf')
+            
+            print('accumulated_sparsity:', accumulated_sparsity)
             print('acceptable_score:', acceptable_score)
-            print("before pruning")
-            self.print_stats()
+            # print("before pruning")
+            # self.print_stats()
 
             for module in self.modules:
                 for name, weight in module.named_parameters():
@@ -290,8 +270,8 @@ class Masking(object):
                                                       quant_level).int()
                         self.masks[mask_name].set_(new_quant_level)
 
-            print("after pruning")
-            self.print_stats()
+            # print("after pruning")
+            # self.print_stats()
 
             total_size = 0
             for name, mask in self.masks.items():
@@ -373,7 +353,7 @@ class Masking(object):
 
         with torch.no_grad():
             print('before truncating')
-            self.print_stats()
+            # self.print_stats()
 
             # prune 
             for module in self.modules:
@@ -389,7 +369,7 @@ class Masking(object):
                         self.masks[mask_name].set_(new_mask)
 
         print('before growing')
-        self.print_stats()
+        # self.print_stats()
 
         # grow
         for module in self.modules:
@@ -439,9 +419,9 @@ class Masking(object):
         sparsity_contributions = (1 - (sorted_bitwidths // 2) / 32.0) - (1 - sorted_bitwidths / 32.0)
         accumulated_sparsity = torch.cumsum(sparsity_contributions / weight_abs.numel(), dim=0)
 
-        print ('accumulated_sparsity:', accumulated_sparsity)
-        print ('prune_rate:', self.prune_rate)
-        threshold_idx = torch.searchsorted(accumulated_sparsity, self.prune_rate, right=True)
+        target_sparsity = self.prune_rate * accumulated_sparsity[-1].item()
+        print ('target_sparsity:', target_sparsity)
+        threshold_idx = torch.searchsorted(accumulated_sparsity, target_sparsity, right=True)
         if threshold_idx < weight_abs.numel():
             threshold = weight_abs.view(-1)[sorted_indices[threshold_idx]]
             self.pruning_rate[mask_name] = accumulated_sparsity[threshold_idx].item()
@@ -488,25 +468,49 @@ class Masking(object):
     #                        torch.floor(quant_level / 2),
     #                        quant_level).int()
 
+
     def quantization_gradient_growth(self, name, new_mask, total_regrowth, weight):
-        grad = self.get_gradient_for_weights(weight)
-        eligible_for_growth = (new_mask < 32)
-        grad = grad * eligible_for_growth.float()
+        grad = self.get_gradient_for_weights(weight)  
+        eligible_for_growth = new_mask < 32  
+        grad = grad * eligible_for_growth.float()  
 
         sorted_idxs = torch.argsort(torch.abs(grad).flatten(), descending=True)
-        decreased_sparsity = 0.0
-        idx = 0
+        
+        current_bitwidths = new_mask.view(-1)[sorted_idxs]
+        next_bitwidths = torch.minimum(current_bitwidths * 2, torch.tensor(32, device=current_bitwidths.device))
+        contribution_per_element = (1 - next_bitwidths / 32.0) - (1 - current_bitwidths / 32.0)
+
         total_elements = weight.numel()
-        while decreased_sparsity < total_regrowth and idx < len(sorted_idxs):
-            current_idx = sorted_idxs[idx]
-            current_bitwidth = new_mask.view(-1)[current_idx]
-            if current_bitwidth < 32:
-                contribution = (1 - (current_bitwidth * 2) / 32.0) - (1 - current_bitwidth / 32.0)
-                decreased_sparsity += contribution / total_elements
-                new_mask.view(-1)[current_idx] = min(32, current_bitwidth * 2)
-            idx += 1
-        print ('After growth: ', decreased_sparsity)
-        return new_mask
+        contributions = contribution_per_element / total_elements
+        accumulated_contributions = torch.cumsum(contributions, dim=0)
+
+        num_elements_to_grow = torch.searchsorted(accumulated_contributions, total_regrowth, right=False)
+        
+        grow_indices = sorted_idxs[:num_elements_to_grow]
+        new_mask_flattened = new_mask.view(-1)
+        new_mask_flattened[grow_indices] = next_bitwidths[:num_elements_to_grow]
+
+        return new_mask.view_as(new_mask)
+
+    # def quantization_gradient_growth(self, name, new_mask, total_regrowth, weight):
+    #     grad = self.get_gradient_for_weights(weight)
+    #     eligible_for_growth = (new_mask < 32)
+    #     grad = grad * eligible_for_growth.float()
+
+    #     sorted_idxs = torch.argsort(torch.abs(grad).flatten(), descending=True)
+    #     decreased_sparsity = 0.0
+    #     idx = 0
+    #     total_elements = weight.numel()
+    #     while decreased_sparsity < total_regrowth and idx < len(sorted_idxs):
+    #         current_idx = sorted_idxs[idx]
+    #         current_bitwidth = new_mask.view(-1)[current_idx]
+    #         if current_bitwidth < 32:
+    #             contribution = (1 - (current_bitwidth * 2) / 32.0) - (1 - current_bitwidth / 32.0)
+    #             decreased_sparsity += contribution / total_elements
+    #             new_mask.view(-1)[current_idx] = min(32, current_bitwidth * 2)
+    #         idx += 1
+    #     print ('After growth: ', decreased_sparsity)
+    #     return new_mask
     
 
     # def quantization_gradient_growth(self, name, new_mask, total_regrowth, weight):

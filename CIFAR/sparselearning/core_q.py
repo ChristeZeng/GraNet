@@ -482,16 +482,46 @@ class Masking(object):
         return grad
 
     def print_nonzero_counts(self):
+        
+        total_num_32 = 0
+        total_num_16 = 0
+        total_num_8 = 0
+        total_num_4 = 0
+        total_num_2 = 0
+        total_num_1 = 0
+        total_num_0 = 0
+        total = 0
         for module in self.modules:
             for name, tensor in module.named_parameters():
                 mask_name = name.replace('weight', 'mask')
                 if mask_name in self.masks:
                     mask = self.masks[mask_name]
                     num_nonzeros = (mask == 32).sum().item()
-                    val = '{0}: {1}->{2}, density: {3:.3f}'.format(mask_name, self.name2nonzeros[mask_name],
-                                                                   num_nonzeros, num_nonzeros / float(mask.numel()))
+                    num_32 = (mask == 32).sum().item()
+                    num_16 = (mask == 16).sum().item()
+                    num_8 = (mask == 8).sum().item()
+                    num_4 = (mask == 4).sum().item()
+                    num_2 = (mask == 2).sum().item()
+                    num_1 = (mask == 1).sum().item()
+                    num_0 = (mask == 0).sum().item()
+
+                    total_num_32 += num_32
+                    total_num_16 += num_16
+                    total_num_8 += num_8
+                    total_num_4 += num_4
+                    total_num_2 += num_2
+                    total_num_1 += num_1
+                    total_num_0 += num_0
+                    total += mask.numel()
+                    # print ratio of each bitwidth
+                    val = '{0}: {1}->{2}, density: {3:.3f}, 32: {4:.3f}, 16: {5:.3f}, 8: {6:.3f}, 4: {7:.3f}, 2: {8:.3f}, 1: {9:.3f}, 0: {10:.3f}'.format(mask_name, self.name2nonzeros[mask_name],
+                                                                   num_nonzeros, num_nonzeros / float(mask.numel()), num_32 / float(mask.numel()), num_16 / float(mask.numel()), num_8 / float(mask.numel()), num_4 / float(mask.numel()), num_2 / float(mask.numel()), num_1 / float(mask.numel()), num_0 / float(mask.numel()))
+                    # val = '{0}: {1}->{2}, density: {3:.3f}'.format(mask_name, self.name2nonzeros[mask_name],
+                    #                                                num_nonzeros, num_nonzeros / float(mask.numel()))
                     print(val)
 
+        # 打印个bitwidth的总占比
+        print ('Total ratio, 32: {0:.3f}, 16: {1:.3f}, 8: {2:.3f}, 4: {3:.3f}, 2: {4:.3f}, 1: {5:.3f}, 0: {6:.3f}'.format(total_num_32 / total, total_num_16 / total, total_num_8 / total, total_num_4 / total, total_num_2 / total, total_num_1 / total, total_num_0 / total))
         print('Death rate: {0}\n'.format(self.prune_rate))
 
     def print_stats(self):

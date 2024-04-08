@@ -367,7 +367,7 @@ class Masking(object):
 
         with torch.no_grad():
             print('before truncating')
-            # self.print_stats()
+            self.print_bitwith_stats()
 
             # prune 
             for module in self.modules:
@@ -376,12 +376,11 @@ class Masking(object):
                     if mask_name in self.masks:
 
                         new_mask = self.adjust_quantization(weight, mask_name)
-                        # print ('After adjust_quantization, pruning_rate:', self.pruning_rate[mask_name])
-                        # self.pruning_rate[mask_name] = int(self.name2nonzeros[mask_name] - (new_mask == 32).sum().item())
-
+                        # print ('death_prune_rate:', self.pruning_rate[mask_name])
                         new_mask = new_mask.to(torch.int32)
                         self.masks[mask_name].set_(new_mask)
 
+        self.print_bitwith_stats()
         print('before growing')
         # self.print_stats()
 
@@ -391,8 +390,8 @@ class Masking(object):
                 mask_name = name.replace('weight', 'mask')
                 if mask_name in self.masks:
                     new_mask = self.masks[mask_name].clone().byte()
- 
-                    new_mask = self.quantization_gradient_growth(mask_name, new_mask, self.pruning_rate[mask_name],
+
+                    new_mask = self.quantization_gradient_growth(new_mask, self.pruning_rate[mask_name],
                                                                 weight)
 
                     new_mask = new_mask.to(torch.int32)
@@ -405,19 +404,6 @@ class Masking(object):
     '''
                     REDISTRIBUTION
     '''
-
-    def gather_statistics(self):
-        self.name2nonzeros = {}
-        self.name2zeros = {}
-
-        for module in self.modules:
-            for name, tensor in module.named_parameters():
-                mask_name = name.replace('weight', 'mask')
-                if mask_name in self.masks:
-                    mask = self.masks[mask_name]
-
-                    self.name2zeros[mask_name] = (mask == 0).sum().item()
-                    self.name2nonzeros[mask_name] = mask.numel() - self.name2zeros[mask_name] 
 
                     # DEATH
 
@@ -432,9 +418,9 @@ class Masking(object):
 
         sparsity_contributions = (1 - (sorted_bitwidths // 2) / 32.0) - (1 - sorted_bitwidths / 32.0)
         accumulated_sparsity = torch.cumsum(sparsity_contributions / weight_abs.numel(), dim=0)
-
+        print ('accumulated_sparsity:', accumulated_sparsity)
         target_sparsity = self.prune_rate * accumulated_sparsity[-1].item()
-        # print ('target_sparsity:', target_sparsity)
+        print ('target_sparsity:', target_sparsity)
         threshold_idx = torch.searchsorted(accumulated_sparsity, target_sparsity, right=True)
         if threshold_idx < weight_abs.numel():
             threshold = weight_abs.view(-1)[sorted_indices[threshold_idx]]
@@ -443,30 +429,31 @@ class Masking(object):
             threshold = 0.0
             self.pruning_rate[mask_name] = 0.0
 
-        # print ('threshold:', threshold)
+        print ('threshold:', threshold)
+        print (f'threshold_idx: {threshold_idx}, weight_abs.numel(): {weight_abs.numel()}')
         new_quant_level = torch.where(weight_abs.view(-1) <= threshold,
                                     torch.floor(quant_level.view(-1) / 2),
                                     quant_level.view(-1))
 
         return new_quant_level.view_as(quant_level)
 
-    def quantization_gradient_growth(self, name, new_mask, total_regrowth, weight):
+    def quantization_gradient_growth(self, new_mask, total_regrowth, weight):
         grad = self.get_gradient_for_weights(weight)  
-        eligible_for_growth = new_mask < 32  
-        grad = grad * eligible_for_growth.float()  
+        # eligible_for_growth = new_mask < 32  
+        # grad = grad * eligible_for_growth.float()  
 
         sorted_idxs = torch.argsort(torch.abs(grad).flatten(), descending=True)
         
         current_bitwidths = new_mask.view(-1)[sorted_idxs]
         next_bitwidths = torch.minimum(current_bitwidths * 2, torch.tensor(32, device=current_bitwidths.device))
-        contribution_per_element = (1 - next_bitwidths / 32.0) - (1 - current_bitwidths / 32.0)
+        contribution_per_element = (1 - current_bitwidths / 32.0) - (1 - next_bitwidths / 32.0)
 
         total_elements = weight.numel()
-        contributions = contribution_per_element / total_elements
-        accumulated_contributions = torch.cumsum(contributions, dim=0)
-
+        accumulated_contributions = torch.cumsum(contribution_per_element / total_elements, dim=0)
+        print ('accumulated_contributions:', accumulated_contributions)
         num_elements_to_grow = torch.searchsorted(accumulated_contributions, total_regrowth, right=False)
-        
+        print ('total_regrowth:', total_regrowth)
+        print ('num_elements_to_grow:', num_elements_to_grow.item())
         grow_indices = sorted_idxs[:num_elements_to_grow]
         new_mask_flattened = new_mask.view(-1)
         new_mask_flattened[grow_indices] = next_bitwidths[:num_elements_to_grow]
@@ -476,12 +463,29 @@ class Masking(object):
     '''
                 UTILITY
     '''
+    def gather_statistics(self):
+        self.name2nonzeros = {}
+        self.name2zeros = {}
+
+        for module in self.modules:
+            for name, _ in module.named_parameters():
+                mask_name = name.replace('weight', 'mask')
+                if mask_name in self.masks:
+                    mask = self.masks[mask_name]
+
+                    self.name2zeros[mask_name] = (mask == 0).sum().item()
+                    self.name2nonzeros[mask_name] = ((mask == 32) * 1.0 
+                                                    + (mask == 16) * 0.5
+                                                    + (mask == 8) * 0.25
+                                                    + (mask == 4) * 0.125
+                                                    + (mask == 2) * 0.0625
+                                                    + (mask == 1) * 0.03125).sum().item()
 
     def get_gradient_for_weights(self, weight):
         grad = weight.grad.clone()
         return grad
 
-    def print_nonzero_counts(self):
+    def print_bitwith_stats(self):
         
         total_num_32 = 0
         total_num_16 = 0
@@ -496,7 +500,32 @@ class Masking(object):
                 mask_name = name.replace('weight', 'mask')
                 if mask_name in self.masks:
                     mask = self.masks[mask_name]
-                    num_nonzeros = (mask == 32).sum().item()
+
+                    total_num_32 += (mask == 32).sum().item()
+                    total_num_16 += (mask == 16).sum().item()
+                    total_num_8 += (mask == 8).sum().item()
+                    total_num_4 += (mask == 4).sum().item()
+                    total_num_2 += (mask == 2).sum().item()
+                    total_num_1 += (mask == 1).sum().item()
+                    total_num_0 += (mask == 0).sum().item()
+                    total += mask.numel()
+
+        print ('Total ratio, 32: {0:.6f}, 16: {1:.6f}, 8: {2:.6f}, 4: {3:.6f}, 2: {4:.6f}, 1: {5:.6f}, 0: {6:.6f}'.format(total_num_32 / total, total_num_16 / total, total_num_8 / total, total_num_4 / total, total_num_2 / total, total_num_1 / total, total_num_0 / total))
+
+    def print_nonzero_counts(self):
+        total_num_32 = 0
+        total_num_16 = 0
+        total_num_8 = 0
+        total_num_4 = 0
+        total_num_2 = 0
+        total_num_1 = 0
+        total_num_0 = 0
+        total = 0
+        for module in self.modules:
+            for name, tensor in module.named_parameters():
+                mask_name = name.replace('weight', 'mask')
+                if mask_name in self.masks:
+                    mask = self.masks[mask_name]
                     num_32 = (mask == 32).sum().item()
                     num_16 = (mask == 16).sum().item()
                     num_8 = (mask == 8).sum().item()
@@ -504,7 +533,7 @@ class Masking(object):
                     num_2 = (mask == 2).sum().item()
                     num_1 = (mask == 1).sum().item()
                     num_0 = (mask == 0).sum().item()
-
+                    num_nonzeros = num_32 * 1.0 + num_16 * 0.5 + num_8 * 0.25 + num_4 * 0.125 + num_2 * 0.0625 + num_1 * 0.03125
                     total_num_32 += num_32
                     total_num_16 += num_16
                     total_num_8 += num_8
@@ -514,14 +543,22 @@ class Masking(object):
                     total_num_0 += num_0
                     total += mask.numel()
                     # print ratio of each bitwidth
-                    val = '{0}: {1}->{2}, density: {3:.3f}, 32: {4:.3f}, 16: {5:.3f}, 8: {6:.3f}, 4: {7:.3f}, 2: {8:.3f}, 1: {9:.3f}, 0: {10:.3f}'.format(mask_name, self.name2nonzeros[mask_name],
-                                                                   num_nonzeros, num_nonzeros / float(mask.numel()), num_32 / float(mask.numel()), num_16 / float(mask.numel()), num_8 / float(mask.numel()), num_4 / float(mask.numel()), num_2 / float(mask.numel()), num_1 / float(mask.numel()), num_0 / float(mask.numel()))
-                    # val = '{0}: {1}->{2}, density: {3:.3f}'.format(mask_name, self.name2nonzeros[mask_name],
-                    #                                                num_nonzeros, num_nonzeros / float(mask.numel()))
+                    val = '{0}: {1:.3f}->{2:.3f}, density: {3:.3f}, 32: {4:.3f}, 16: {5:.3f}, 8: {6:.3f}, 4: {7:.3f}, 2: {8:.3f}, 1: {9:.3f}, 0: {10:.3f}'.format(
+                            mask_name, 
+                            self.name2nonzeros[mask_name],
+                            num_nonzeros, 
+                            num_nonzeros / float(mask.numel()), 
+                            num_32 / float(mask.numel()), 
+                            num_16 / float(mask.numel()), 
+                            num_8 / float(mask.numel()), 
+                            num_4 / float(mask.numel()), 
+                            num_2 / float(mask.numel()), 
+                            num_1 / float(mask.numel()), 
+                            num_0 / float(mask.numel()))
+                    
                     print(val)
 
-        # 打印个bitwidth的总占比
-        print ('Total ratio, 32: {0:.3f}, 16: {1:.3f}, 8: {2:.3f}, 4: {3:.3f}, 2: {4:.3f}, 1: {5:.3f}, 0: {6:.3f}'.format(total_num_32 / total, total_num_16 / total, total_num_8 / total, total_num_4 / total, total_num_2 / total, total_num_1 / total, total_num_0 / total))
+        print ('Total ratio, 32: {0:.6f}, 16: {1:.6f}, 8: {2:.6f}, 4: {3:.6f}, 2: {4:.6f}, 1: {5:.6f}, 0: {6:.6f}'.format(total_num_32 / total, total_num_16 / total, total_num_8 / total, total_num_4 / total, total_num_2 / total, total_num_1 / total, total_num_0 / total))
         print('Death rate: {0}\n'.format(self.prune_rate))
 
     def print_stats(self):

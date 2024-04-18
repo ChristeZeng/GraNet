@@ -110,6 +110,9 @@ class Masking(object):
         self.prune_rate = prune_rate
         self.name2prune_rate = {}
         self.steps = 0
+        
+        self.finish_global_pruning = False
+        self.name2sparsity = {}
 
         if self.args.fix:
             self.prune_every_k_steps = None
@@ -268,8 +271,12 @@ class Masking(object):
 
                 all_weights = torch.cat([torch.abs(weight).view(-1) for module in self.modules for name, weight in module.named_parameters() if name.replace('weight', 'mask') in self.masks])
                 all_bitwidths = torch.cat([self.masks[name.replace('weight', 'mask')].view(-1) for module in self.modules for name, weight in module.named_parameters() if name.replace('weight', 'mask') in self.masks])
-                sorted_indices = torch.argsort(all_weights)
+                sort_key = all_bitwidths.float() * 1000 - all_weights
+                sorted_indices = torch.argsort(sort_key, descending=True)
 
+                print ('all_weights:', all_weights[sorted_indices])
+                print ('all_bitwidths:', all_bitwidths[sorted_indices])
+                
                 sparsity_contributions = (1 - (all_bitwidths[sorted_indices] // 2) / 32.0) - (1 - all_bitwidths[sorted_indices] / 32.0)
                 accumulated_sparsity = torch.cumsum(sparsity_contributions / all_weights.numel(), dim=0)
 
@@ -304,7 +311,19 @@ class Masking(object):
 
             print('Sparsity after pruning: {0}'.format(
                 sparse_size / total_size))
-
+        elif not self.finish_global_pruning:
+            self.finish_global_pruning = True
+            print('No Global pruning is performed and Record the final sparsity')
+            self.name2sparsity = {}
+            for name, mask in self.masks.items():
+                sparse_size = ((mask == 16) * 0.5
+                                + (mask == 8) * 0.75
+                                + (mask == 4) * 0.875
+                                + (mask == 2) * 0.9375
+                                + (mask == 1) * 0.96875
+                                + (mask == 0) * 1.0).sum().item()
+                self.name2sparsity[name] = sparse_size / mask.numel()
+                
     def add_module(self, module, sparse_init='ERK', grad_dic=None):
         self.module = module
         self.sparse_init = self.sparse_init
@@ -391,7 +410,7 @@ class Masking(object):
                 if mask_name in self.masks:
                     new_mask = self.masks[mask_name].clone().byte()
 
-                    new_mask = self.quantization_gradient_growth(new_mask, self.pruning_rate[mask_name],
+                    new_mask = self.quantization_gradient_growth(mask_name, new_mask, self.pruning_rate[mask_name],
                                                                 weight)
 
                     new_mask = new_mask.to(torch.int32)
@@ -418,9 +437,9 @@ class Masking(object):
 
         sparsity_contributions = (1 - (sorted_bitwidths // 2) / 32.0) - (1 - sorted_bitwidths / 32.0)
         accumulated_sparsity = torch.cumsum(sparsity_contributions / weight_abs.numel(), dim=0)
-        print ('accumulated_sparsity:', accumulated_sparsity)
+        # print ('accumulated_sparsity:', accumulated_sparsity)
         target_sparsity = self.prune_rate * accumulated_sparsity[-1].item()
-        print ('target_sparsity:', target_sparsity)
+        # print ('target_sparsity:', target_sparsity)
         threshold_idx = torch.searchsorted(accumulated_sparsity, target_sparsity, right=True)
         if threshold_idx < weight_abs.numel():
             threshold = weight_abs.view(-1)[sorted_indices[threshold_idx]]
@@ -429,15 +448,15 @@ class Masking(object):
             threshold = 0.0
             self.pruning_rate[mask_name] = 0.0
 
-        print ('threshold:', threshold)
-        print (f'threshold_idx: {threshold_idx}, weight_abs.numel(): {weight_abs.numel()}')
+        # print ('threshold:', threshold)
+        # print (f'threshold_idx: {threshold_idx}, weight_abs.numel(): {weight_abs.numel()}')
         new_quant_level = torch.where(weight_abs.view(-1) <= threshold,
                                     torch.floor(quant_level.view(-1) / 2),
                                     quant_level.view(-1))
 
         return new_quant_level.view_as(quant_level)
 
-    def quantization_gradient_growth(self, new_mask, total_regrowth, weight):
+    def quantization_gradient_growth(self, name, new_mask, total_regrowth, weight):
         grad = self.get_gradient_for_weights(weight)  
         # eligible_for_growth = new_mask < 32  
         # grad = grad * eligible_for_growth.float()  
@@ -450,10 +469,20 @@ class Masking(object):
 
         total_elements = weight.numel()
         accumulated_contributions = torch.cumsum(contribution_per_element / total_elements, dim=0)
-        print ('accumulated_contributions:', accumulated_contributions)
-        num_elements_to_grow = torch.searchsorted(accumulated_contributions, total_regrowth, right=False)
-        print ('total_regrowth:', total_regrowth)
-        print ('num_elements_to_grow:', num_elements_to_grow.item())
+        # print ('accumulated_contributions:', accumulated_contributions)
+        if self.finish_global_pruning:
+            newsparsity = ((new_mask == 16) * 0.5 
+                        + (new_mask == 8) * 0.75
+                        + (new_mask == 4) * 0.875
+                        + (new_mask == 2) * 0.9375
+                        + (new_mask == 1) * 0.96875
+                        + (new_mask == 0) * 1.0).sum().item() / total_elements
+            total_regrowth = newsparsity - self.name2sparsity[name]
+            print ('new total_regrowth:', total_regrowth)
+
+        num_elements_to_grow = torch.searchsorted(accumulated_contributions, total_regrowth, right=True)
+        # print ('total_regrowth:', total_regrowth)
+        # print ('num_elements_to_grow:', num_elements_to_grow.item())
         grow_indices = sorted_idxs[:num_elements_to_grow]
         new_mask_flattened = new_mask.view(-1)
         new_mask_flattened[grow_indices] = next_bitwidths[:num_elements_to_grow]
@@ -511,6 +540,7 @@ class Masking(object):
                     total += mask.numel()
 
         print ('Total ratio, 32: {0:.6f}, 16: {1:.6f}, 8: {2:.6f}, 4: {3:.6f}, 2: {4:.6f}, 1: {5:.6f}, 0: {6:.6f}'.format(total_num_32 / total, total_num_16 / total, total_num_8 / total, total_num_4 / total, total_num_2 / total, total_num_1 / total, total_num_0 / total))
+        print ('Total Density: {0:.6f}'.format((total_num_32 * 1.0 + total_num_16 * 0.5 + total_num_8 * 0.25 + total_num_4 * 0.125 + total_num_2 * 0.0625 + total_num_1 * 0.03125) / total))
 
     def print_nonzero_counts(self):
         total_num_32 = 0
@@ -559,6 +589,7 @@ class Masking(object):
                     print(val)
 
         print ('Total ratio, 32: {0:.6f}, 16: {1:.6f}, 8: {2:.6f}, 4: {3:.6f}, 2: {4:.6f}, 1: {5:.6f}, 0: {6:.6f}'.format(total_num_32 / total, total_num_16 / total, total_num_8 / total, total_num_4 / total, total_num_2 / total, total_num_1 / total, total_num_0 / total))
+        print ('Total Density: {0:.6f}'.format((total_num_32 * 1.0 + total_num_16 * 0.5 + total_num_8 * 0.25 + total_num_4 * 0.125 + total_num_2 * 0.0625 + total_num_1 * 0.03125) / total))
         print('Death rate: {0}\n'.format(self.prune_rate))
 
     def print_stats(self):

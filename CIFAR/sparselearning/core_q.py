@@ -5,7 +5,7 @@ import torch.optim as optim
 import numpy as np
 import math
 # from .quantization import *
-
+from sparselearning.utils import print_and_log
 
 def add_sparse_args(parser):
     # hyperparameters for Zero-Cost Neuroregeneration
@@ -33,6 +33,8 @@ def add_sparse_args(parser):
     parser.add_argument('--init-prune-epoch', type=int, default=0, help='The pruning rate / death rate.')
     parser.add_argument('--final-prune-epoch', type=int, default=110, help='The density of the overall sparse network.')
     parser.add_argument('--rm-first', action='store_true', help='Keep the first layer dense.')
+    parser.add_argument('--sp-mode', type=int, default=1, help='0: magnitude first, 1: bitwidth first')
+    parser.add_argument('--exclude-rate', type=float, default=0.0, help='Exclude rate for pruning')
 
 
 class CosineDecay(object):
@@ -69,8 +71,8 @@ class Masking(object):
                  device=None):
         growth_modes = ['random', 'momentum', 'momentum_neuron', 'gradient']
         if growth_mode not in growth_modes:
-            print('Growth mode: {0} not supported!'.format(growth_mode))
-            print('Supported modes are:', str(growth_modes))
+            print_and_log('Growth mode: {0} not supported!'.format(growth_mode))
+            print_and_log('Supported modes are:', str(growth_modes))
 
         self.args = args
         self.loader = train_loader
@@ -121,20 +123,20 @@ class Masking(object):
 
     def init(self, mode='ER', density=0.05, erk_power_scale=1.0, grad_dict=None):
         if self.args.method == 'GraNet':
-            print('initialized with GMP, 32bits')
+            print_and_log('initialized with GMP, 32bits')
             self.baseline_nonzero = 0
             for module in self.modules:
                 for name, buffer in module.named_buffers():
                     if 'mask' in name:
-                        # print(f'init mask {name}: {buffer.view(-1)}')
+                        # print_and_log(f'init mask {name}: {buffer.view(-1)}')
                         self.masks[name] = buffer
                         self.baseline_nonzero += (self.masks[name] == 32).sum().int().item()
 
-            # print("During initialization")
+            # print_and_log("During initialization")
             # self.print_stats()
 
         elif self.sparse_init == 'ERK':
-            print('initialize by ERK')
+            print_and_log('initialize by ERK')
             for name, weight in self.masks.items():
                 self.total_params += weight.numel()
                 if 'classifier' in name:
@@ -177,7 +179,7 @@ class Masking(object):
                     is_epsilon_valid = False
                     for mask_name, mask_raw_prob in raw_probabilities.items():
                         if mask_raw_prob == max_prob:
-                            print(f"Sparsity of var:{mask_name} had to be set to 0.")
+                            print_and_log(f"Sparsity of var:{mask_name} had to be set to 0.")
                             dense_layers.add(mask_name)
                 else:
                     is_epsilon_valid = True
@@ -192,13 +194,13 @@ class Masking(object):
                 else:
                     probability_one = epsilon * raw_probabilities[name]
                     density_dict[name] = probability_one
-                print(
+                print_and_log(
                     f"layer: {name}, shape: {mask.shape}, density: {density_dict[name]}"
                 )
                 self.masks[name][:] = (torch.rand(mask.shape) < density_dict[name]).float().data.cuda()
 
                 total_nonzero += density_dict[name] * mask.numel()
-            print(f"Overall sparsity {total_nonzero / self.total_params}")
+            print_and_log(f"Overall sparsity {total_nonzero / self.total_params}")
 
         total_size = 0
         for name, weight in self.masks.items():
@@ -213,7 +215,7 @@ class Masking(object):
                             + (weight == 1) * 0.96875
                             + (weight == 0) * 1.0).sum().item()
         
-        print('Total parameters under sparsity level of {0}: {1}'.format(density, sparse_size / total_size))
+        print_and_log('Total parameters under sparsity level of {0}: {1}'.format(density, sparse_size / total_size))
 
     def step(self):
         self.optimizer.step()
@@ -221,6 +223,7 @@ class Masking(object):
         self.prune_rate = self.prune_rate_decay.get_dr()
         self.steps += 1
 
+        flag=False
         if self.prune_every_k_steps is not None:
             if self.args.method == 'GraNet':
                 if self.steps >= (self.args.init_prune_epoch * len(
@@ -228,6 +231,9 @@ class Masking(object):
                     self.pruning(self.steps)
                     self.truncate_weights(self.steps)
                     self.print_nonzero_counts()
+                    flag=True
+
+        return self.steps, flag
 
     def pruning(self, step):
         # prune_rate = 1 - self.args.final_density - self.args.init_density
@@ -237,21 +243,21 @@ class Masking(object):
         ini_iter = int(
             (self.args.init_prune_epoch * len(self.loader) * self.args.multiplier) / self.prune_every_k_steps)
         total_prune_iter = final_iter - ini_iter
-        print('******************************************************')
-        print(f'Pruning Progress is {curr_prune_iter - ini_iter} / {total_prune_iter}')
-        print('******************************************************')
+        print_and_log('******************************************************')
+        print_and_log(f'Pruning Progress is {curr_prune_iter - ini_iter} / {total_prune_iter}')
+        print_and_log('******************************************************')
 
         if curr_prune_iter >= ini_iter and curr_prune_iter <= final_iter - 1:
             prune_decay = (1 - ((curr_prune_iter - ini_iter) / total_prune_iter)) ** 3
             curr_prune_rate = (1 - self.args.init_density) + (self.args.init_density - self.args.final_density) * (
                     1 - prune_decay)
 
-            print ('curr_prune_rate:', curr_prune_rate)
+            print_and_log('curr_prune_rate:', curr_prune_rate)
 
             total_size = 0
             for name, mask in self.masks.items():
                 total_size += mask.numel()
-            print('Total masked parameters:', total_size)
+            print_and_log('Total masked parameters:', total_size)
             
             sparse_size = 0
             for name, mask in self.masks.items():
@@ -267,16 +273,23 @@ class Masking(object):
             meetable = True
             while meetable:
                 
-                print ('need_prune_rate:', need_prune_rate)
+                print_and_log ('need_prune_rate:', need_prune_rate)
 
                 all_weights = torch.cat([torch.abs(weight).view(-1) for module in self.modules for name, weight in module.named_parameters() if name.replace('weight', 'mask') in self.masks])
                 all_bitwidths = torch.cat([self.masks[name.replace('weight', 'mask')].view(-1) for module in self.modules for name, weight in module.named_parameters() if name.replace('weight', 'mask') in self.masks])
-                sort_key = all_bitwidths.float() * 1000 - all_weights
-                sorted_indices = torch.argsort(sort_key, descending=True)
 
-                print ('all_weights:', all_weights[sorted_indices])
-                print ('all_bitwidths:', all_bitwidths[sorted_indices])
-                
+                if self.args.sp_mode == 1:
+                    sort_key = all_bitwidths.double() * 1e3 - all_weights.double()
+                    sorted_indices = torch.argsort(sort_key, descending=True)
+
+                    torch.set_printoptions(edgeitems=10)
+                    print_and_log ('all_weights:', all_weights[sorted_indices])
+                    print_and_log ('all_bitwidths:', all_bitwidths[sorted_indices])
+                    torch.set_printoptions(precision=16)
+                    print_and_log ('sort_key:', sort_key[sorted_indices])
+                else:
+                    sorted_indices = torch.argsort(all_weights)
+
                 sparsity_contributions = (1 - (all_bitwidths[sorted_indices] // 2) / 32.0) - (1 - all_bitwidths[sorted_indices] / 32.0)
                 accumulated_sparsity = torch.cumsum(sparsity_contributions / all_weights.numel(), dim=0)
 
@@ -285,18 +298,32 @@ class Masking(object):
                 meetable = False if threshold_idx < all_weights.numel() else True
                 need_prune_rate -= accumulated_sparsity[threshold_idx].item() if threshold_idx < all_weights.numel() else accumulated_sparsity[-1].item()
                 
-                print('accumulated_sparsity:', accumulated_sparsity)
-                print('acceptable_score:', acceptable_score)
+                if self.args.sp_mode == 1:
+                    new_bitwidths = all_bitwidths.clone()
+                    new_bitwidths[sorted_indices[:threshold_idx + 1]] = (new_bitwidths[sorted_indices[:threshold_idx + 1]] // 2)
 
-                for module in self.modules:
-                    for name, weight in module.named_parameters():
-                        mask_name = name.replace('weight', 'mask')
-                        if mask_name in self.masks:
-                            quant_level = self.masks[mask_name]
-                            new_quant_level = torch.where(torch.abs(weight) <= acceptable_score,
-                                                        torch.floor(quant_level / 2),
-                                                        quant_level).int()
-                            self.masks[mask_name].set_(new_quant_level)
+                    # Update masks back
+                    offset = 0
+                    for module in self.modules:
+                        for name, weight in module.named_parameters():
+                            if name.replace('weight', 'mask') in self.masks:
+                                mask_name = name.replace('weight', 'mask')
+                                numel = weight.numel()
+                                self.masks[mask_name].view(-1).copy_(new_bitwidths[offset:offset + numel])
+                                offset += numel
+                else:
+                    print_and_log ('accumulated_sparsity:', accumulated_sparsity)
+                    print_and_log ('acceptable_score:', acceptable_score)
+
+                    for module in self.modules:
+                        for name, weight in module.named_parameters():
+                            mask_name = name.replace('weight', 'mask')
+                            if mask_name in self.masks:
+                                quant_level = self.masks[mask_name]
+                                new_quant_level = torch.where(torch.abs(weight) <= acceptable_score,
+                                                            torch.floor(quant_level / 2),
+                                                            quant_level).int()
+                                self.masks[mask_name].set_(new_quant_level)
 
 
             sparse_size = 0
@@ -309,11 +336,11 @@ class Masking(object):
                                 + (mask == 1) * 0.96875
                                 + (mask == 0) * 1.0).sum().item()
 
-            print('Sparsity after pruning: {0}'.format(
+            print_and_log('Sparsity after pruning: {0}'.format(
                 sparse_size / total_size))
         elif not self.finish_global_pruning:
             self.finish_global_pruning = True
-            print('No Global pruning is performed and Record the final sparsity')
+            print_and_log('No Global pruning is performed and Record the final sparsity')
             self.name2sparsity = {}
             for name, mask in self.masks.items():
                 sparse_size = ((mask == 16) * 0.5
@@ -337,34 +364,34 @@ class Masking(object):
         #     for name, tensor in module.named_parameters():
         #         if 'conv.weight' in name or 'feature.0.weight' in name:
         #             self.masks.pop(name)
-        #             print(f"pop out {name}")
+        #             print_and_log(f"pop out {name}")
         
         self.init(mode=self.args.sparse_init, density=self.args.init_density, grad_dict=grad_dic)
 
     def remove_weight(self, name):
         print ('In remove_weight')
         if name in self.masks:
-            print('Removing {0} of size {1} = {2} parameters.'.format(name, self.masks[name].shape,
+            print_and_log('Removing {0} of size {1} = {2} parameters.'.format(name, self.masks[name].shape,
                                                                       self.masks[name].numel()))
             self.masks.pop(name)
         elif name + '.weight' in self.masks:
-            print('Removing {0} of size {1} = {2} parameters.'.format(name, self.masks[name + '.weight'].shape,
+            print_and_log('Removing {0} of size {1} = {2} parameters.'.format(name, self.masks[name + '.weight'].shape,
                                                                       self.masks[name + '.weight'].numel()))
             self.masks.pop(name + '.weight')
         else:
-            print('ERROR', name)
+            print_and_log('ERROR', name)
 
     def remove_weight_partial_name(self, partial_name):
         print ('In remove_weight_partial_name')
         removed = set()
         for name in list(self.masks.keys()):
             if partial_name in name:
-                print('Removing {0} of size {1} with {2} parameters...'.format(name, self.masks[name].shape,
+                print_and_log('Removing {0} of size {1} with {2} parameters...'.format(name, self.masks[name].shape,
                                                                                np.prod(self.masks[name].shape)))
                 removed.add(name)
                 self.masks.pop(name)
 
-        print('Removed {0} layers.'.format(len(removed)))
+        print_and_log('Removed {0} layers.'.format(len(removed)))
 
         i = 0
         while i < len(self.names):
@@ -385,7 +412,7 @@ class Masking(object):
         self.gather_statistics()
 
         with torch.no_grad():
-            print('before truncating')
+            print_and_log('before truncating')
             self.print_bitwith_stats()
 
             # prune 
@@ -400,7 +427,7 @@ class Masking(object):
                         self.masks[mask_name].set_(new_mask)
 
         self.print_bitwith_stats()
-        print('before growing')
+        print_and_log('before growing')
         # self.print_stats()
 
         # grow
@@ -586,15 +613,15 @@ class Masking(object):
                             num_1 / float(mask.numel()), 
                             num_0 / float(mask.numel()))
                     
-                    print(val)
+                    print_and_log(val)
 
         print ('Total ratio, 32: {0:.6f}, 16: {1:.6f}, 8: {2:.6f}, 4: {3:.6f}, 2: {4:.6f}, 1: {5:.6f}, 0: {6:.6f}'.format(total_num_32 / total, total_num_16 / total, total_num_8 / total, total_num_4 / total, total_num_2 / total, total_num_1 / total, total_num_0 / total))
         print ('Total Density: {0:.6f}'.format((total_num_32 * 1.0 + total_num_16 * 0.5 + total_num_8 * 0.25 + total_num_4 * 0.125 + total_num_2 * 0.0625 + total_num_1 * 0.03125) / total))
-        print('Death rate: {0}\n'.format(self.prune_rate))
+        print_and_log('Death rate: {0}\n'.format(self.prune_rate))
 
     def print_stats(self):
         for module in self.modules:
             for name, _ in module.named_parameters():
                 mask_name = name.replace('weight', 'mask')
                 if mask_name in self.masks:
-                    print(f'{mask_name} mask: {self.masks[mask_name].view(-1)}')
+                    print_and_log(f'{mask_name} mask: {self.masks[mask_name].view(-1)}')

@@ -231,6 +231,7 @@ class Masking(object):
                     self.pruning(self.steps)
                     self.truncate_weights(self.steps)
                     self.print_nonzero_counts()
+                    self.print_bitwidth_magnitude_range()
                     flag=True
 
         return self.steps, flag
@@ -278,6 +279,11 @@ class Masking(object):
                 all_weights = torch.cat([torch.abs(weight).view(-1) for module in self.modules for name, weight in module.named_parameters() if name.replace('weight', 'mask') in self.masks])
                 all_bitwidths = torch.cat([self.masks[name.replace('weight', 'mask')].view(-1) for module in self.modules for name, weight in module.named_parameters() if name.replace('weight', 'mask') in self.masks])
 
+                if self.args.exclude_rate > 0:
+                    exclusion_threshold = torch.topk(all_weights, int(len(all_weights) * self.args.exclude_rate), largest=True)[0].min()
+                else:
+                    exclusion_threshold = float('inf')
+
                 if self.args.sp_mode == 1:
                     sort_key = all_bitwidths.double() * 1e3 - all_weights.double()
                     sorted_indices = torch.argsort(sort_key, descending=True)
@@ -289,18 +295,23 @@ class Masking(object):
                     print_and_log ('sort_key:', sort_key[sorted_indices])
                 else:
                     sorted_indices = torch.argsort(all_weights)
-
+                    
+                mask_for_pruning = (all_weights[sorted_indices] < exclusion_threshold)
                 sparsity_contributions = (1 - (all_bitwidths[sorted_indices] // 2) / 32.0) - (1 - all_bitwidths[sorted_indices] / 32.0)
-                accumulated_sparsity = torch.cumsum(sparsity_contributions / all_weights.numel(), dim=0)
+                adjusted_sparsity_contributions = sparsity_contributions[mask_for_pruning]
+                adjusted_accumulated_sparsity = torch.cumsum(adjusted_sparsity_contributions / all_weights.numel(), dim=0)
 
-                threshold_idx = torch.searchsorted(accumulated_sparsity, need_prune_rate, right=True) 
-                acceptable_score = all_weights[sorted_indices[threshold_idx]].item() if threshold_idx < all_weights.numel() else float('inf')
-                meetable = False if threshold_idx < all_weights.numel() else True
-                need_prune_rate -= accumulated_sparsity[threshold_idx].item() if threshold_idx < all_weights.numel() else accumulated_sparsity[-1].item()
+                threshold_idx = torch.searchsorted(adjusted_accumulated_sparsity, need_prune_rate, right=True)
+                adjusted_acceptable_score = all_weights[sorted_indices[mask_for_pruning]][threshold_idx].item() if threshold_idx < mask_for_pruning.sum() else float('inf')
+                meetable = False if threshold_idx < mask_for_pruning.sum() else True
+                need_prune_rate -= adjusted_accumulated_sparsity[threshold_idx].item() if threshold_idx < mask_for_pruning.sum() else adjusted_accumulated_sparsity[-1].item()
                 
+                if meetable is False:
+                    print_and_log ('Meetable is False')
+
                 if self.args.sp_mode == 1:
                     new_bitwidths = all_bitwidths.clone()
-                    new_bitwidths[sorted_indices[:threshold_idx + 1]] = (new_bitwidths[sorted_indices[:threshold_idx + 1]] // 2)
+                    new_bitwidths[sorted_indices[mask_for_pruning][:threshold_idx + 1]] = (new_bitwidths[sorted_indices[mask_for_pruning][:threshold_idx + 1]] // 2)
 
                     # Update masks back
                     offset = 0
@@ -312,15 +323,15 @@ class Masking(object):
                                 self.masks[mask_name].view(-1).copy_(new_bitwidths[offset:offset + numel])
                                 offset += numel
                 else:
-                    print_and_log ('accumulated_sparsity:', accumulated_sparsity)
-                    print_and_log ('acceptable_score:', acceptable_score)
+                    print_and_log ('adjusted_accumulated_sparsity:', adjusted_accumulated_sparsity)
+                    print_and_log ('adjusted_acceptable_score:', adjusted_acceptable_score)
 
                     for module in self.modules:
                         for name, weight in module.named_parameters():
                             mask_name = name.replace('weight', 'mask')
                             if mask_name in self.masks:
                                 quant_level = self.masks[mask_name]
-                                new_quant_level = torch.where(torch.abs(weight) <= acceptable_score,
+                                new_quant_level = torch.where((torch.abs(weight) <= adjusted_acceptable_score),
                                                             torch.floor(quant_level / 2),
                                                             quant_level).int()
                                 self.masks[mask_name].set_(new_quant_level)
@@ -328,7 +339,6 @@ class Masking(object):
 
             sparse_size = 0
             for name, mask in self.masks.items():
-                # sparse_size += (mask == 32).sum().int().item()
                 sparse_size += ((mask == 16) * 0.5
                                 + (mask == 8) * 0.75
                                 + (mask == 4) * 0.875
@@ -625,3 +635,31 @@ class Masking(object):
                 mask_name = name.replace('weight', 'mask')
                 if mask_name in self.masks:
                     print_and_log(f'{mask_name} mask: {self.masks[mask_name].view(-1)}')
+
+    def print_bitwidth_magnitude_range(self):
+        bitwidth_ranges = {}
+        
+        for module in self.modules:
+            for name, weight in module.named_parameters():
+                mask_name = name.replace('weight', 'mask')
+                if mask_name in self.masks:
+                    bitwidths = self.masks[mask_name].view(-1)
+                    weights = torch.abs(weight).view(-1)
+                    
+                    for bitwidth in torch.unique(bitwidths):
+                        if bitwidth.item() not in bitwidth_ranges:
+                            bitwidth_ranges[bitwidth.item()] = {'min': float('inf'), 'max': float('-inf')}
+                        
+                        current_weights = weights[bitwidths == bitwidth]
+                        
+                        if current_weights.numel() > 0:
+                            min_val = current_weights.min().item()
+                            max_val = current_weights.max().item()
+                            
+                            if min_val < bitwidth_ranges[bitwidth.item()]['min']:
+                                bitwidth_ranges[bitwidth.item()]['min'] = min_val
+                            if max_val > bitwidth_ranges[bitwidth.item()]['max']:
+                                bitwidth_ranges[bitwidth.item()]['max'] = max_val
+        
+        for bitwidth, ranges in bitwidth_ranges.items():
+            print(f"Bitwidth {bitwidth}: Min Magnitude = {ranges['min']}, Max Magnitude = {ranges['max']}")

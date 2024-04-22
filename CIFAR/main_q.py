@@ -4,7 +4,6 @@ import os
 import shutil
 import time
 import argparse
-import logging
 import hashlib
 import copy
 
@@ -12,12 +11,13 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.backends.cudnn as cudnn
+from torch.utils.tensorboard import SummaryWriter
 
 import sparselearning
 from models import initializers, vgg
 from sparselearning.core_q import Masking, CosineDecay, LinearDecay
 from sparselearning.resnet_cifar100_q import ResNet34, ResNet18, ResNet50
-from sparselearning.utils import get_mnist_dataloaders, get_cifar10_dataloaders, get_cifar100_dataloaders
+from sparselearning.utils import *
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -43,39 +43,9 @@ def save_checkpoint(state, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
 
 
-def setup_logger(args):
-    global logger
-    if logger == None:
-        logger = logging.getLogger()
-    else:  # wish there was a logger.close()
-        for handler in logger.handlers[:]:  # make a copy of the list
-            logger.removeHandler(handler)
-
-    args_copy = copy.deepcopy(args)
-    # copy to get a clean hash
-    # use the same log file hash if iterations or verbose are different
-    # these flags do not change the results
-    args_copy.iters = 1
-    args_copy.verbose = False
-    args_copy.log_interval = 1
-    args_copy.seed = 0
-
-    log_path = './logs/{0}_{1}_{2}.log'.format(args.model, args.final_density, hashlib.md5(str(args_copy).encode('utf-8')).hexdigest()[:8])
-
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter(fmt='%(asctime)s: %(message)s', datefmt='%H:%M:%S')
-
-    fh = logging.FileHandler(log_path)
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-
-def print_and_log(msg):
-    global logger
-    print(msg)
-    logger.info(msg)
 
 
-def train(args, model, device, train_loader, optimizer, epoch, mask=None):
+def train(args, model, device, train_loader, optimizer, epoch, mask=None, mask_monitor=None, weight_monitor=None, maskWeight_monitor=None):
     model.train()
     train_loss = 0
     correct = 0
@@ -99,8 +69,24 @@ def train(args, model, device, train_loader, optimizer, epoch, mask=None):
         else:
             loss.backward()
 
-        if mask is not None: mask.step()
+        if mask is not None:
+            step,pruned=mask.step()
+            with torch.no_grad():
+                mask_monitor.record_mask_distribution(step,log_interval=args.update_frequency)
+                weight_monitor.record_weight_magnitude(step,log_interval=args.update_frequency)
+                maskWeight_monitor.record_weight_magnitude_by_mask(step, log_interval=args.update_frequency)
+                if pruned:
+                    mask_monitor.plot_distributions(False)
+                    mask_monitor.plot_distributions(True)
+                    weight_monitor.plot_distributions(False)
+                    weight_monitor.plot_distributions(True)
+                    maskWeight_monitor.plot_distributions(False)
+                    maskWeight_monitor.plot_distributions(True)
+
         else: optimizer.step()
+
+
+
 
         if batch_idx % args.log_interval == 0:
             print_and_log('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f} Accuracy: {}/{} ({:.3f}% '.format(
@@ -178,17 +164,26 @@ def main():
     parser.add_argument('--decay-schedule', type=str, default='cosine', help='The decay schedule for the pruning rate. Default: cosine. Choose from: cosine, linear.')
     parser.add_argument('--nolr_scheduler', action='store_true', default=False,
                         help='disables CUDA training')
+    parser.add_argument('--tb-port', type=int, default=6007)
+    parser.add_argument('--name', type=str, default='def')
+
+
     sparselearning.core_q.add_sparse_args(parser)
 
     args = parser.parse_args()
-    setup_logger(args)
+
+    run_name = f'{args.name}_{args.model}_{args.method}_{args.final_density:.4f}_{args.seed}'
+
+    log_path = f'./logs/{run_name}.log'
+    setup_logger(log_path)
     print_and_log(args)
+
 
     if args.fp16:
         try:
             from apex.fp16_utils import FP16_Optimizer
         except:
-            print('WARNING: apex not installed, ignoring --fp16 option')
+            print_and_log('WARNING: apex not installed, ignoring --fp16 option')
             args.fp16 = False
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
@@ -210,9 +205,9 @@ def main():
             train_loader, valid_loader, test_loader = get_cifar100_dataloaders(args, args.valid_split,  max_threads=args.max_threads)
             num_class = 100
         if args.model not in models:
-            print('You need to select an existing model via the --model argument. Available models include: ')
+            print_and_log('You need to select an existing model via the --model argument. Available models include: ')
             for key in models:
-                print('\t{0}'.format(key))
+                print_and_log('\t{0}'.format(key))
             raise Exception('You need to select a model')
         else:
             if args.model == 'ResNet50':
@@ -244,7 +239,7 @@ def main():
         elif args.optimizer == 'adam':
             optimizer = optim.Adam(model.parameters(),lr=args.lr,weight_decay=args.l2)
         else:
-            print('Unknown optimizer: {0}'.format(args.optimizer))
+            print_and_log('Unknown optimizer: {0}'.format(args.optimizer))
             raise Exception('Unknown optimizer.')
 
         if args.nolr_scheduler:
@@ -261,7 +256,7 @@ def main():
 
 
         if args.fp16:
-            print('FP16')
+            print_and_log('FP16')
             optimizer = FP16_Optimizer(optimizer,
                                        static_loss_scale = None,
                                        dynamic_loss_scale = True,
@@ -276,16 +271,26 @@ def main():
                            redistribution_mode=args.redistribution, args=args, train_loader=train_loader)
             mask.add_module(model, sparse_init=args.sparse_init)
 
+        cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
+        if cuda_devices is not None:
+            device_id = cuda_devices
+        else:
+            device_id = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
+
+        # save models
+        save_subfolder = f'./save/{run_name}'
+        if not os.path.exists(save_subfolder): os.makedirs(save_subfolder)
+
+
+        mask_monitor = MaskMonitor(model,output_dir=os.path.join(save_subfolder,'figs'))
+        weight_monitor = WeightMagnitudeMonitor(model,output_dir=os.path.join(save_subfolder,'figs'))
+        maskWeight_monitor = MaskWeightMagnitudeMonitor(model, output_dir=os.path.join(save_subfolder,'figs'))
+
         best_acc = 0.0
         for epoch in range(1, args.epochs*args.multiplier + 1):
 
-            # save models
-            save_path = './save/' + str(args.model) + '/' + str(args.data) + '/' + str(args.method)  + '/' + str(args.seed)
-            save_subfolder = os.path.join(save_path, 'Multiplier=' + str(args.multiplier)  + '_sparsity' + str(1-args.final_density))
-            if not os.path.exists(save_subfolder): os.makedirs(save_subfolder)
-
             t0 = time.time()
-            train(args, model, device, train_loader, optimizer, epoch, mask)
+            train(args, model, device, train_loader, optimizer, epoch, mask, mask_monitor, weight_monitor, maskWeight_monitor)
             lr_scheduler.step()
             if args.valid_split > 0.0:
                 val_acc = evaluate(args, model, device, test_loader)
@@ -293,17 +298,17 @@ def main():
             # target sparsity is reached
             if epoch == args.multiplier * args.final_prune_epoch+1:
                 best_acc = 0.0
-
+            
             cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
             if cuda_devices is not None:
                 device_id = cuda_devices
             else:
                 device_id = torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'
-                
-            savename = f'model_final_{device_id}.pth'
+
+            savename = f'model_final.pth'
             print ('device_id:', device_id)
             if val_acc > best_acc:
-                print('Saving model')
+                print_and_log('Saving model')
                 best_acc = val_acc
                 save_checkpoint({
                     'epoch': epoch + 1,
@@ -313,11 +318,12 @@ def main():
 
             print_and_log('Current learning rate: {0}. Time taken for epoch: {1:.2f} seconds.\n'.format(optimizer.param_groups[0]['lr'], time.time() - t0))
 
-        print('Testing model')
+        print_and_log('Testing model')
         model.load_state_dict(torch.load(os.path.join(save_subfolder, savename))['state_dict'])
         test_acc = evaluate(args, model, device, test_loader, is_test_set=True)
-        print('Test accuracy is:', test_acc)
+        print_and_log('Test accuracy is:', test_acc)
+        # writer.close()
 
 
 if __name__ == '__main__':
-   main()
+    main()

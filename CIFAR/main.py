@@ -12,12 +12,13 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.backends.cudnn as cudnn
+from torch.utils.tensorboard import SummaryWriter
 
 import sparselearning
 from models import cifar_resnet, initializers, vgg
 from sparselearning.core import Masking, CosineDecay, LinearDecay
 from sparselearning.resnet_cifar100 import ResNet34, ResNet18, ResNet50
-from sparselearning.utils import get_mnist_dataloaders, get_cifar10_dataloaders, get_cifar100_dataloaders
+from sparselearning.utils import *
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -41,39 +42,6 @@ models['vgg19'] = ()
 def save_checkpoint(state, filename='checkpoint.pth.tar'):
     print("SAVING")
     torch.save(state, filename)
-
-
-def setup_logger(args):
-    global logger
-    if logger == None:
-        logger = logging.getLogger()
-    else:  # wish there was a logger.close()
-        for handler in logger.handlers[:]:  # make a copy of the list
-            logger.removeHandler(handler)
-
-    args_copy = copy.deepcopy(args)
-    # copy to get a clean hash
-    # use the same log file hash if iterations or verbose are different
-    # these flags do not change the results
-    args_copy.iters = 1
-    args_copy.verbose = False
-    args_copy.log_interval = 1
-    args_copy.seed = 0
-
-    log_path = './logs/{0}_{1}_{2}.log'.format(args.model, args.final_density, hashlib.md5(str(args_copy).encode('utf-8')).hexdigest()[:8])
-
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter(fmt='%(asctime)s: %(message)s', datefmt='%H:%M:%S')
-
-    fh = logging.FileHandler(log_path)
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-
-def print_and_log(msg):
-    global logger
-    print(msg)
-    logger.info(msg)
-
 
 def train(args, model, device, train_loader, optimizer, epoch, mask=None):
     model.train()
@@ -178,10 +146,14 @@ def main():
     parser.add_argument('--decay-schedule', type=str, default='cosine', help='The decay schedule for the pruning rate. Default: cosine. Choose from: cosine, linear.')
     parser.add_argument('--nolr_scheduler', action='store_true', default=False,
                         help='disables CUDA training')
+    parser.add_argument('--tb-port', type=int, default=6007)
+    parser.add_argument('--name', type=str, default='def')
     sparselearning.core.add_sparse_args(parser)
 
     args = parser.parse_args()
-    setup_logger(args)
+    run_name = f'{args.name}_{args.model}_{args.method}_{args.final_density:.4f}_{args.seed}'
+    log_path = f'./logs/{run_name}.log'
+    setup_logger(log_path)
     print_and_log(args)
 
     if args.fp16:
